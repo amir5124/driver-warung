@@ -66,15 +66,18 @@
       [
         "expo-location",
         {
-          "locationAlwaysAndWhenInUsePermission": "Waruung Driver memerlukan akses lokasi untuk melacak posisimu dan mengarahkan ke titik jemput/tujuan.",
-          "isAndroidBackgroundLocationEnabled": true
+          "locationWhenInUsePermission": "Driver Waruung memerlukan akses lokasi untuk menampilkan posisimu di peta.",
+          "locationAlwaysAndWhenInUsePermission": "Driver Waruung memerlukan akses lokasi, termasuk saat aplikasi di latar belakang, untuk melacak posisimu dan mengarahkan ke titik jemput/tujuan.",
+          "isAndroidBackgroundLocationEnabled": true,
+          "isAndroidForegroundServiceEnabled": true,
+          "isIosBackgroundLocationEnabled": true
         }
       ],
       [
         "expo-image-picker",
         {
-          "photosPermission": "Waruung Driver memerlukan akses galeri untuk mengganti foto profil.",
-          "cameraPermission": "Waruung Driver memerlukan akses kamera untuk mengambil foto profil."
+          "photosPermission": "Driver Waruung memerlukan akses galeri untuk mengganti foto profil.",
+          "cameraPermission": "Driver Waruung memerlukan akses kamera untuk mengambil foto profil."
         }
       ],
       [

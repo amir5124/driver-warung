@@ -6,7 +6,8 @@ import {
     BANYUWANGI_REGION,
     useUserLocation,
 } from '@/hooks/use-user-location';
-import { api } from '@/lib/api';
+import { api, getToken } from '@/lib/api';
+import { authState } from '@/lib/authState';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router, useFocusEffect } from 'expo-router';
@@ -66,6 +67,15 @@ export default function HomeStep({ isOnline, onToggleOnline }: Props) {
         null
     );
 
+    // 🆕 Track mounted — untuk abort fetch saat unmount
+    const mountedRef = useRef(true);
+    useEffect(() => {
+        mountedRef.current = true;
+        return () => {
+            mountedRef.current = false;
+        };
+    }, []);
+
     // Profil driver
     const [profile, setProfile] = useState<ProfileCache | null>(null);
     const [stats, setStats] = useState<DriverStats>(DEFAULT_STATS);
@@ -97,39 +107,66 @@ export default function HomeStep({ isOnline, onToggleOnline }: Props) {
         setAlertState((a) => ({ ...a, visible: false }));
 
     // ============================================================
-    // Load data — dengan defensive null guards
+    // Helper: cek apakah error "Sesi habis"
+    // ============================================================
+    const isSessionError = (err: any) =>
+        String(err?.message ?? '').includes('Sesi habis');
+
+    // ============================================================
+    // Load data — dengan defensive guards
     // ============================================================
     const loadData = useCallback(async () => {
         try {
+            // 🆕 Guard 1: sedang logout
+            if (authState.isLoggingOut()) {
+                console.log('[HOME] Sedang logout → skip load');
+                return;
+            }
+
+            // 🆕 Guard 2: tidak ada token
+            const token = await getToken();
+            if (!token) {
+                console.log('[HOME] Tidak ada token → skip load');
+                return;
+            }
+
+            // 🆕 Guard 3: unmounted
+            if (!mountedRef.current) {
+                console.log('[HOME] Unmounted → skip load');
+                return;
+            }
+
             // ── 1. Cache profil dulu ──
             const raw = await AsyncStorage.getItem('profile');
             if (raw) {
                 try {
                     const parsed = JSON.parse(raw);
-                    if (parsed) {
+                    if (parsed && mountedRef.current) {
                         setProfile({
                             full_name: parsed.full_name ?? null,
                             avatar_url: parsed.avatar_url ?? null,
                         });
                     }
                 } catch (e) {
-                    console.warn(
-                        '[HOME] Gagal parse cache profil:',
-                        e
-                    );
+                    console.warn('[HOME] Gagal parse cache profil:', e);
                 }
             }
 
-            // ── 2. Fresh profil — dengan try/catch + null guard ──
+            // ── 2. Fresh profil ──
             let freshProfile: any = null;
             try {
                 freshProfile = await api.me();
             } catch (err: any) {
-                console.warn(
-                    '[HOME] Gagal fetch api.me():',
-                    err?.message
-                );
+                // 🆕 Diamkan kalau "Sesi habis"
+                if (!isSessionError(err)) {
+                    console.warn(
+                        '[HOME] Gagal fetch api.me():',
+                        err?.message
+                    );
+                }
             }
+
+            if (!mountedRef.current) return;
 
             if (freshProfile?.id) {
                 setProfile({
@@ -148,30 +185,34 @@ export default function HomeStep({ isOnline, onToggleOnline }: Props) {
                     );
                 }
             } else {
-                console.warn(
-                    '[HOME] api.me() return null — pakai cache'
-                );
+                console.log('[HOME] api.me() null — pakai cache');
             }
 
-            // ── 3. Driver profile (rating, trips, verified) ──
-            let driverRating = 0;
+            // ── 3. Driver profile ──
+            let driverRating: number | null = null;
             let driverTotalTrips = 0;
             try {
                 const dp = await api.drivers.getMyProfile();
+                if (!mountedRef.current) return;
+
                 if (dp) {
-                    driverRating = dp.rating_avg ?? 0;
+                    driverRating = dp.rating_avg ?? null;
                     driverTotalTrips = dp.total_trips ?? 0;
                     setIsVerified(dp.is_verified ?? false);
                 } else {
                     setIsVerified(false);
                 }
             } catch (err: any) {
-                console.warn(
-                    '[HOME] Gagal load driver profile:',
-                    err?.message
-                );
-                setIsVerified(false);
+                if (!isSessionError(err)) {
+                    console.warn(
+                        '[HOME] Gagal load driver profile:',
+                        err?.message
+                    );
+                }
+                if (mountedRef.current) setIsVerified(false);
             }
+
+            if (!mountedRef.current) return;
 
             // ── 4. Earnings ──
             let completedToday = 0;
@@ -198,11 +239,15 @@ export default function HomeStep({ isOnline, onToggleOnline }: Props) {
                 ).length;
                 totalToday = todayOrders.length;
             } catch (err: any) {
-                console.warn(
-                    '[HOME] Gagal load earnings:',
-                    err?.message
-                );
+                if (!isSessionError(err)) {
+                    console.warn(
+                        '[HOME] Gagal load earnings:',
+                        err?.message
+                    );
+                }
             }
+
+            if (!mountedRef.current) return;
 
             // ── 5. Performance ──
             const performancePct =
@@ -222,9 +267,13 @@ export default function HomeStep({ isOnline, onToggleOnline }: Props) {
                 totalTrips: driverTotalTrips,
             });
         } catch (err: any) {
-            console.warn('[HOME] Gagal load data:', err?.message);
+            if (!isSessionError(err)) {
+                console.warn('[HOME] Gagal load data:', err?.message);
+            }
         } finally {
-            setLoadingStats(false);
+            if (mountedRef.current) {
+                setLoadingStats(false);
+            }
         }
     }, []);
 
@@ -233,6 +282,25 @@ export default function HomeStep({ isOnline, onToggleOnline }: Props) {
             loadData();
         }, [loadData])
     );
+
+    // ============================================================
+    // 🆕 Reload saat app kembali aktif (dari background)
+    // ============================================================
+    useEffect(() => {
+        const { AppState } = require('react-native');
+        const sub = AppState.addEventListener(
+            'change',
+            (state: string) => {
+                if (state === 'active') {
+                    // Skip kalau sedang logout
+                    if (authState.isLoggingOut()) return;
+                    console.log('[HOME] App aktif → reload');
+                    loadData();
+                }
+            }
+        );
+        return () => sub.remove();
+    }, [loadData]);
 
     // ============================================================
     // Lokasi
@@ -270,19 +338,24 @@ export default function HomeStep({ isOnline, onToggleOnline }: Props) {
 
         const push = async () => {
             try {
+                // 🆕 Guard: skip kalau tidak ada token / sedang logout
+                if (authState.isLoggingOut()) return;
+                const token = await getToken();
+                if (!token) return;
+
                 await api.drivers.updateLocation(
                     coords.latitude,
                     coords.longitude
                 );
             } catch (err: any) {
+                // Skip log untuk error yang tidak penting
                 if (
-                    !String(err?.message).includes('Tidak bisa terhubung')
+                    isSessionError(err) ||
+                    String(err?.message).includes('Tidak bisa terhubung')
                 ) {
-                    console.warn(
-                        '[HOME] Gagal update lokasi:',
-                        err.message
-                    );
+                    return;
                 }
+                console.warn('[HOME] Gagal update lokasi:', err.message);
             }
         };
 
@@ -302,11 +375,10 @@ export default function HomeStep({ isOnline, onToggleOnline }: Props) {
     }, [isOnline, coords]);
 
     // ============================================================
-    // FAB handler — dengan guard verifikasi
+    // FAB handler
     // ============================================================
     const handleFabPress = () => {
         if (!isOnline) {
-            // Belum verified → tidak bisa online
             if (isVerified === false) {
                 showAlert(
                     'Akun Belum Terverifikasi',
@@ -400,9 +472,9 @@ export default function HomeStep({ isOnline, onToggleOnline }: Props) {
                                     setProfile((prev) =>
                                         prev
                                             ? {
-                                                ...prev,
-                                                avatar_url: null,
-                                            }
+                                                  ...prev,
+                                                  avatar_url: null,
+                                              }
                                             : prev
                                     );
                                 }}
@@ -462,7 +534,7 @@ export default function HomeStep({ isOnline, onToggleOnline }: Props) {
             </View>
 
             {/* ============================================================
-                BANNER VERIFIKASI — muncul kalau belum verified
+                BANNER VERIFIKASI
             ============================================================ */}
             {isVerified === false && (
                 <Pressable
@@ -521,7 +593,11 @@ export default function HomeStep({ isOnline, onToggleOnline }: Props) {
                         {/* Rating — selalu tampil, 0.0 kalau belum ada */}
                         <View style={s.statsDivider} />
                         <View style={s.statsItem}>
-                            <Ionicons name="star" size={14} color="#F5A623" />
+                            <Ionicons
+                                name="star"
+                                size={14}
+                                color="#F5A623"
+                            />
                             <Text style={s.statsText}>
                                 {Number(stats.rating ?? 0).toFixed(1)}
                             </Text>
@@ -652,7 +728,6 @@ const s = StyleSheet.create({
         gap: 14,
     },
 
-    // Banner verifikasi
     verifyBanner: {
         position: 'absolute',
         left: 16,
